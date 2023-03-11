@@ -1,6 +1,6 @@
 
-CC = cc
-CLFAGS = -Wall -Wextra -O2 -g
+CC ?= cc
+CLFAGS ?= -Wall -Wextra -O2 -g
 
 all: gwdown
 
