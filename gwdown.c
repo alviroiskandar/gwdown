@@ -875,6 +875,7 @@ static void *run_gwdown_parallel_download_worker(void *data)
 
 		tmp = (off_t)gwdown_lseek(fd, thread->start, SEEK_SET);
 		if (tmp < 0) {
+			close(fd);
 			fprintf(stderr, "lseek64() failed: %s\n", strerror(errno));
 			ctx->stop = true;
 			goto out;
