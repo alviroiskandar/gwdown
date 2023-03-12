@@ -633,8 +633,8 @@ static size_t try_fetch_file_body_curl_callback(void *ptr, size_t size,
 			return 0;
 
 		print_single_thread_download_info(ctx);
-		printf("Downloading file %s (%zu bytes)...\n", state->output,
-		       info->content_length);
+		printf("Downloading file %s (%llu bytes)...\n", state->output,
+		       (unsigned long long)info->content_length);
 	}
 
 	wr_ret = write(state->fd, ptr, rsize);
