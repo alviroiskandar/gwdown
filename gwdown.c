@@ -26,6 +26,7 @@
 #include <inttypes.h>
 #include <sys/mman.h>
 #include <libgen.h>
+#include <signal.h>
 #include <curl/curl.h>
 
 #define DEFAULT_NUM_THREADS 8
@@ -275,6 +276,48 @@ static int init_gwdown_context(struct gwdown_ctx *ctx)
 out:
 	destroy_gwdown_context(ctx);
 	return ret;
+}
+
+static void signal_handler(int sig)
+{
+	struct gwdown_ctx *ctx = g_ctx;
+
+	if (!ctx)
+		return;
+
+	switch (sig) {
+	case SIGINT:
+	case SIGTERM:
+	case SIGHUP:
+		ctx->stop = true;
+		break;
+	}
+}
+
+static int install_signal_handlers(void)
+{
+	struct sigaction act;
+	int ret;
+
+	memset(&act, 0, sizeof(act));
+	act.sa_handler = signal_handler;
+	sigemptyset(&act.sa_mask);
+	act.sa_flags = 0;
+
+	if (sigaction(SIGINT, &act, NULL) < 0)
+		goto out_err;
+	if (sigaction(SIGTERM, &act, NULL) < 0)
+		goto out_err;
+	if (sigaction(SIGHUP, &act, NULL) < 0)
+		goto out_err;
+
+	return 0;
+
+out_err:
+	ret = errno;
+	fprintf(stderr, "Error: Failed to install signal handler: %s\n",
+		strerror(ret));
+	return -ret;
 }
 
 static void destroy_threads(struct gwdown_ctx *ctx)
@@ -1037,6 +1080,10 @@ int main(int argc, char *argv[])
 		goto out;
 
 	ret = init_gwdown_context(&ctx);
+	if (ret)
+		goto out;
+
+	ret = install_signal_handlers();
 	if (ret)
 		goto out;
 
