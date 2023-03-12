@@ -850,11 +850,62 @@ static size_t paralell_download_body_curl_callback(void *ptr, size_t size,
 	return (size_t)wr_ret;
 }
 
+static int prepare_parallel_download(struct gwdown_thread *thread)
+{
+	struct gwdown_ctx *ctx = thread->ctx;
+	struct gwdown_file_state *state = &ctx->file_state;
+	int ret = 0;
+	off_t tmp;
+	int fd;
+
+	if (ctx->use_mmap) {
+		assert(state->map != NULL);
+		return 0;
+	}
+
+	/*
+	 * If we don't use mmap() for writing, @state->map must be NULL.
+	 */
+	assert(state->map == NULL);
+
+	if (thread->fd != -1) {
+		/*
+		 * If we don't use mmap() for writing, we need to open
+		 * the output file for each thread. Except for the first
+		 * thread, as we already opened it in allocate_file().
+		 */
+		assert(thread->tid == 0);
+		return 0;
+	}
+
+	assert(state->map == NULL);
+	fd = open(ctx->file_state.output, O_WRONLY);
+	if (fd < 0) {
+		ret = -errno;
+		fprintf(stderr, "open() failed: %s\n", strerror(-ret));
+		goto out_err;
+	}
+
+	tmp = (off_t)gwdown_lseek(fd, thread->start, SEEK_SET);
+	if (tmp < 0) {
+		ret = -errno;
+		close(fd);
+		fprintf(stderr, "lseek() failed: %s\n", strerror(-ret));
+		goto out_err;
+	}
+
+	thread->fd = fd;
+	return 0;
+
+out_err:
+	ctx->stop = true;
+	return ret;
+}
+
 static void *run_gwdown_parallel_download_worker(void *data)
 {
 	struct gwdown_thread *thread = data;
 	struct gwdown_ctx *ctx = thread->ctx;
-	struct gwdown_file_state *state = &ctx->file_state;
 	CURL *ch = thread->curl;
 	char range[128];
 	CURLcode res;
@@ -863,30 +914,8 @@ static void *run_gwdown_parallel_download_worker(void *data)
 		 (unsigned long long)thread->start,
 		 (unsigned long long)thread->end);
 
-	if (thread->tid > 0 && !ctx->use_mmap) {
-		off_t tmp;
-		int fd;
-
-		assert(state->map == NULL);
-		fd = open(ctx->file_state.output, O_WRONLY);
-		if (fd < 0) {
-			fprintf(stderr, "open() failed: %s\n", strerror(errno));
-			ctx->stop = true;
-			goto out;
-		}
-
-		tmp = (off_t)gwdown_lseek(fd, thread->start, SEEK_SET);
-		if (tmp < 0) {
-			close(fd);
-			fprintf(stderr, "lseek64() failed: %s\n", strerror(errno));
-			ctx->stop = true;
-			goto out;
-		}
-
-		thread->fd = fd;
-	} else if (ctx->use_mmap) {
-		assert(state->map != NULL);
-	}
+	if (prepare_parallel_download(thread))
+		goto out;
 
 	curl_easy_setopt(ch, CURLOPT_URL, ctx->url);
 	curl_easy_setopt(ch, CURLOPT_RANGE, range);
@@ -950,6 +979,8 @@ static int run_parallel_download(struct gwdown_ctx *ctx)
 		if (i == 0) {
 			thread->fd = ctx->file_state.fd;
 			continue;
+		} else {
+			thread->fd = -1;
 		}
 
 		ret = pthread_create(&thread->thread, NULL,
