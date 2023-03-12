@@ -5,7 +5,7 @@ CLFAGS ?= -Wall -Wextra -O2 -g -I/usr/include -I/usr/local/include -L/usr/lib -L
 all: gwdown
 
 gwdown: gwdown.c
-	$(CC) $(CLFAGS) -o gwdown gwdown.c -lcurl
+	$(CC) $(CLFAGS) -o gwdown gwdown.c -lcurl -lpthread
 
 clean:
 	rm -f gwdown
