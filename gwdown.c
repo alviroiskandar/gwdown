@@ -32,6 +32,18 @@
 #define MIN_PARALLEL_DOWNLOAD_SIZE 65536ull
 #define EXHAUST_SIZE_BEFORE_DONT_NEED (1024ull * 1024ull * 1024ull)
 
+#ifdef __FreeBSD__
+static off_t gwdown_lseek(int fd, off_t offset, int whence)
+{
+	return lseek(fd, offset, whence);
+}
+#else
+static off64_t gwdown_lseek(int fd, off64_t offset, int whence)
+{
+	return lseek64(fd, offset, whence);
+}
+#endif
+
 struct gwdown_thread {
 	int			fd;
 	CURL			*curl;
@@ -847,7 +859,7 @@ static void *run_gwdown_parallel_download_worker(void *data)
 			goto out;
 		}
 
-		tmp = lseek64(fd, thread->start, SEEK_SET);
+		tmp = (off_t)gwdown_lseek(fd, thread->start, SEEK_SET);
 		if (tmp < 0) {
 			fprintf(stderr, "lseek64() failed: %s\n", strerror(errno));
 			ctx->stop = true;
