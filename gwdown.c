@@ -55,8 +55,10 @@ struct gwdown_thread {
 	uint64_t		start;
 	uint64_t		end;
 	uint16_t		tid;
+	uint16_t		counter;
 	volatile bool		finished;
 	volatile bool		got_206;
+	pthread_mutex_t		mutex;
 };
 
 struct gwdown_file_info {
@@ -65,13 +67,6 @@ struct gwdown_file_info {
 	char		*accept_ranges;
 	char		*content_disposition;
 	uint64_t	content_length;
-};
-
-struct gwdown_file_state {
-	int	fd;
-	size_t	map_size;
-	char	*map;
-	char	*output;
 };
 
 struct gwdown_resume_data {
@@ -85,6 +80,17 @@ struct gwdown_resume_state {
 	uint16_t			num_data;
 	struct gwdown_resume_data	data[];
 } __attribute__((__packed__));
+
+struct gwdown_file_state {
+	int	fd;
+	int	resume_fd;
+	size_t	map_size;
+	char	*map;
+	char	*output;
+	char	*resume_file;
+	pthread_mutex_t	mutex;
+	struct gwdown_resume_state *resume_state;
+};
 
 struct gwdown_ctx {
 	volatile bool			stop;
@@ -242,8 +248,18 @@ static int init_threads(struct gwdown_ctx *ctx)
 	for (i = 0; i < ctx->num_threads; i++) {
 		thread = &ctx->threads[i];
 		thread->tid = i;
+
+		ret = pthread_mutex_init(&thread->mutex, NULL);
+		if (ret) {
+			fprintf(stderr, "Error: Failed to init mutex: %s\n",
+				strerror(ret));
+			return -ret;
+		}
+
 		thread->curl = curl_easy_init();
 		if (!thread->curl) {
+			pthread_mutex_destroy(&thread->mutex);
+
 			/*
 			 * No need to destroy the mutex and cond here
 			 * because the caller will destroy it in
@@ -271,6 +287,7 @@ static int init_gwdown_context(struct gwdown_ctx *ctx)
 		goto out;
 
 	ctx->file_state.fd = -1;
+	ctx->file_state.resume_fd = -1;
 	g_ctx = ctx;
 	return 0;
 
@@ -333,8 +350,10 @@ static void destroy_threads(struct gwdown_ctx *ctx)
 		thread = &ctx->threads[i];
 		if (thread->ctx)
 			pthread_join(thread->thread, NULL);
-		if (thread->curl)
+		if (thread->curl) {
+			pthread_mutex_destroy(&thread->mutex);
 			curl_easy_cleanup(thread->curl);
+		}
 	}
 
 	pthread_mutex_lock(&ctx->download_finished_mutex);
@@ -362,10 +381,17 @@ static void destroy_file_state(struct gwdown_ctx *ctx)
 
 	if (state->fd != -1)
 		close(state->fd);
+	if (state->resume_fd != -1)
+		close(state->resume_fd);
 
 	if (state->map) {
 		msync(state->map, state->map_size, MS_ASYNC);
 		munmap(state->map, state->map_size);
+	}
+
+	if (state->resume_file) {
+		pthread_mutex_destroy(&state->mutex);
+		free(state->resume_file);
 	}
 
 	free(state->output);
@@ -767,6 +793,105 @@ static int try_fetch_file(struct gwdown_ctx *ctx)
 	return allocate_file(ctx);
 }
 
+static int pthread_mutex_allow_try(pthread_mutex_t *mutex, bool try)
+{
+	if (try)
+		return pthread_mutex_trylock(mutex);
+	else
+		return pthread_mutex_lock(mutex);
+}
+
+static int open_resume_file(struct gwdown_ctx *ctx)
+{
+	struct gwdown_file_state *state = &ctx->file_state;
+	int ret;
+	int fd;
+
+	if (state->resume_fd != -1)
+		return 0;
+
+	fd = open(state->resume_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0) {
+		ret = -errno;
+		fprintf(stderr, "Failed to open resume file %s: %s\n",
+			state->resume_file, strerror(-ret));
+		return ret;
+	}
+
+	state->resume_fd = fd;
+	return 0;
+}
+
+static int __commit_resume_data(struct gwdown_ctx *ctx, bool force)
+{
+	struct gwdown_file_state *state = &ctx->file_state;
+	struct gwdown_resume_state *rs = state->resume_state;
+	size_t resume_state_size;
+	ssize_t wr_ret;
+	int ret;
+
+	ret = open_resume_file(ctx);
+	if (ret)
+		return ret;
+
+	resume_state_size = sizeof(*rs) + rs->num_data * sizeof(rs->data[0]);
+	printf("Committing resume data of size %zu bytes to %s\n",
+	       resume_state_size, state->resume_file);
+	wr_ret = pwrite(state->resume_fd, state->resume_state,
+			resume_state_size, 0);
+	if (wr_ret < 0) {
+		ret = -errno;
+		fprintf(stderr, "Failed to write to resume file %s: %s\n",
+			state->resume_file, strerror(-ret));
+		goto out_err;
+	}
+
+	if (force)
+		fsync(state->resume_fd);
+
+	return 0;
+
+out_err:
+	close(state->resume_fd);
+	state->resume_fd = -1;
+	return ret;
+}
+
+static int commit_resume_data(struct gwdown_ctx *ctx, bool force)
+{
+	struct gwdown_file_state *state = &ctx->file_state;
+	struct gwdown_thread *threads = ctx->threads;
+	struct gwdown_resume_state *rs = state->resume_state;
+	uint16_t num_data = 0;
+	int ret = 0;
+	uint16_t i;
+
+	if (pthread_mutex_allow_try(&state->mutex, force))
+		return -EBUSY;
+
+	if (!state->resume_state)
+		goto out;
+
+	for (i = 0; i < ctx->num_threads; i++) {
+		struct gwdown_thread *thread = &threads[i];
+
+		if (thread->finished)
+			continue;
+
+		if (pthread_mutex_allow_try(&thread->mutex, force))
+			return -EBUSY;
+		rs->data[num_data].start = thread->offset;
+		rs->data[num_data].end = thread->end;
+		pthread_mutex_unlock(&thread->mutex);
+		num_data++;
+	}
+	rs->num_data = num_data;
+	ret = __commit_resume_data(ctx, force);
+out:
+	pthread_mutex_unlock(&state->mutex);
+	return ret;
+}
+
 static bool decide_whether_the_download_has_finished(struct gwdown_ctx *ctx)
 {
 	uint16_t i;
@@ -890,7 +1015,9 @@ static size_t paralell_download_body_curl_callback(void *ptr, size_t size,
 
 	if (ctx->use_mmap) {
 		memcpy(&state->map[thread->offset], ptr, rsize);
+		pthread_mutex_lock(&thread->mutex);
 		thread->offset += rsize;
+		pthread_mutex_unlock(&thread->mutex);
 		give_memory_advice(thread, state);
 		wr_ret = (ssize_t)rsize;
 	} else {
@@ -900,8 +1027,13 @@ static size_t paralell_download_body_curl_callback(void *ptr, size_t size,
 			ctx->stop = true;
 			return 0;
 		}
+		pthread_mutex_lock(&thread->mutex);
 		thread->offset += wr_ret;
+		pthread_mutex_unlock(&thread->mutex);
 	}
+
+	if (thread->counter++ % 512 == 0)
+		commit_resume_data(ctx, false);
 
 	return (size_t)wr_ret;
 }
@@ -992,6 +1124,7 @@ static void *run_gwdown_parallel_download_worker(void *data)
 	}
 
 	thread->finished = true;
+	commit_resume_data(ctx, true);
 	if (thread->tid == 0) {
 		wait_for_download_finish(ctx);
 	} else {
@@ -1004,11 +1137,41 @@ out:
 	return data;
 }
 
+static int init_resume_file(struct gwdown_ctx *ctx)
+{
+	struct gwdown_resume_state *resume_state;
+	struct gwdown_file_state *state = &ctx->file_state;
+	char *res_file;
+	size_t size;
+
+	size = strlen(state->output) + 6;
+	res_file = malloc(size);
+	if (!res_file)
+		return -ENOMEM;
+
+	size = sizeof(*resume_state);
+	size += sizeof(resume_state->data[0]) * ctx->num_threads;
+	resume_state = calloc(1u, size);
+	if (!resume_state) {
+		free(res_file);
+		return -ENOMEM;
+	}
+
+	snprintf(res_file, size, "%s.res", state->output);
+	state->resume_file = res_file;
+	state->resume_state = resume_state;
+	return 0;
+}
+
 static int run_parallel_download(struct gwdown_ctx *ctx)
 {
 	struct gwdown_thread *thread;
 	int ret;
 	int i;
+
+	ret = init_resume_file(ctx);
+	if (ret)
+		return ret;
 
 	ctx->per_thread_size = ctx->file_info.content_length / ctx->num_threads;
 
