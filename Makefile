@@ -1,6 +1,6 @@
 
 CC ?= cc
-CLFAGS ?= -Wall -Wextra -O2 -g -I/usr/include -I/usr/local/include -L/usr/lib -L/usr/local/lib -O2
+CLFAGS ?= -Wall -Wextra -g -I/usr/include -I/usr/local/include -L/usr/lib -L/usr/local/lib -O2
 
 all: gwdown
 
