@@ -450,6 +450,8 @@ static int decide_output_file_name(struct gwdown_ctx *ctx)
 
 	state->output = strdup(basename(tmp));
 	free(tmp);
+	if (!state->output)
+		goto out;
 
 	tmp = state->output;
 	while (1) {
