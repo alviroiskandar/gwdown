@@ -32,15 +32,15 @@
 #define MIN_PARALLEL_DOWNLOAD_SIZE 65536ull
 #define EXHAUST_SIZE_BEFORE_DONT_NEED (1024ull * 1024ull * 1024ull)
 
-#ifdef __FreeBSD__
-static off_t gwdown_lseek(int fd, off_t offset, int whence)
-{
-	return lseek(fd, offset, whence);
-}
-#else
+#ifdef __linux__
 static off64_t gwdown_lseek(int fd, off64_t offset, int whence)
 {
 	return lseek64(fd, offset, whence);
+}
+#else
+static off_t gwdown_lseek(int fd, off_t offset, int whence)
+{
+	return lseek(fd, offset, whence);
 }
 #endif
 
