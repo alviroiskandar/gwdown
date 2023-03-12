@@ -73,6 +73,18 @@ struct gwdown_file_state {
 	char	*output;
 };
 
+struct gwdown_resume_data {
+	uint64_t	start;
+	uint64_t	end;
+};
+
+struct gwdown_resume_state {
+	uint64_t			file_size;
+	uint16_t			__pad[3];
+	uint16_t			num_data;
+	struct gwdown_resume_data	data[];
+} __attribute__((__packed__));
+
 struct gwdown_ctx {
 	volatile bool			stop;
 	volatile bool			download_finished;
