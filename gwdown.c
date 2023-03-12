@@ -175,7 +175,9 @@ static int parse_options(int argc, char *argv[], struct gwdown_ctx *ctx)
 	}
 
 	if (optind < argc) {
-		ctx->url = argv[optind];
+		ctx->url = strdup(argv[optind]);
+		if (!ctx->url)
+			ret = -ENOMEM;
 	} else {
 		printf("Error: Missing url argument\n\n");
 		help(argv[0]);
@@ -284,6 +286,7 @@ static void destroy_threads(struct gwdown_ctx *ctx)
 	pthread_mutex_destroy(&ctx->download_finished_mutex);
 	pthread_cond_destroy(&ctx->download_finished_cond);
 	free(ctx->threads);
+	ctx->threads = NULL;
 }
 
 static void destroy_file_info(struct gwdown_ctx *ctx)
@@ -319,6 +322,7 @@ static void destroy_gwdown_context(struct gwdown_ctx *ctx)
 	destroy_threads(ctx);
 	destroy_file_info(ctx);
 	destroy_file_state(ctx);
+	free(ctx->url);
 	curl_global_cleanup();
 }
 
@@ -666,6 +670,7 @@ static size_t try_fetch_file_body_curl_callback(void *ptr, size_t size,
  */
 static int try_fetch_file(struct gwdown_ctx *ctx)
 {
+	char *effective_url;
 	CURLcode res;
 	CURL *ch;
 
@@ -687,13 +692,21 @@ static int try_fetch_file(struct gwdown_ctx *ctx)
 		return -EIO;
 	}
 
-	if (ctx->continue_parallel_download) {
-		printf("Parallel download is possible, the file size is %llu bytes\n",
-		       (unsigned long long)ctx->file_info.content_length);
-		return allocate_file(ctx);
+	if (!ctx->continue_parallel_download)
+		return 0;
+
+	res = curl_easy_getinfo(ch, CURLINFO_EFFECTIVE_URL, &effective_url);
+	if (res == CURLE_OK && strcmp(effective_url, ctx->url)) {
+		free(ctx->url);
+		ctx->url = strdup(effective_url);
+		if (!ctx->url)
+			return -ENOMEM;
 	}
 
-	return 0;
+	printf("Parallel download is possible, the file size is %llu bytes\n",
+	       (unsigned long long)ctx->file_info.content_length);
+
+	return allocate_file(ctx);
 }
 
 static bool decide_whether_the_download_has_finished(struct gwdown_ctx *ctx)
