@@ -364,6 +364,7 @@ static bool fix_up_header(char **header_p, size_t rsize, bool *need_free)
 
 		memcpy(header, orig, rsize);
 		header[rsize] = '\0';
+		*header_p = header;
 		*need_free = true;
 		return true;
 	}
