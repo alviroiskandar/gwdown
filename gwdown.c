@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Jangan pelanggaran, ini source code open source GPLv2.
- *
  * gwdown - Simple multi-threaded download tool
  *
- * Author: Alviro Iskandar Setiawan <alviro.iskandar@gnuweeb.org> # (copyright holder 100%)
+ * Author: Alviro Iskandar Setiawan <alviro.iskandar@gnuweeb.org>
  * License: GPLv2
  * Version: 0.1
- * Website: https://www.gnuweeb.org
- *
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -118,11 +114,10 @@ static void help(const char *prog)
 	printf("  -M, --mmap\t\t\tUse mmap for writing file\n");
 	printf("\n");
 	printf("License: GPLv2\n");
-	printf("Author: Alviro Iskandar Setiawan <alviro.iskandar@gnuweeb.org>  # (full copyright holder 100%%)\n");
+	printf("Author: Alviro Iskandar Setiawan <alviro.iskandar@gnuweeb.org>\n");
 	printf("\n");
-	printf("Full open source: https://github.com/alviroiskandar/gwdown\n");
+	printf("This software is open source, available at: https://github.com/alviroiskandar/gwdown\n");
 	printf("\n");
-	printf("!!! Jangan pelanggaran, ini source code open source GPLv2. !!!\n\n");
 }
 
 static int parse_options(int argc, char *argv[], struct gwdown_ctx *ctx)
