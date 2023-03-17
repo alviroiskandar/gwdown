@@ -24,7 +24,7 @@
 #include <libgen.h>
 #include <curl/curl.h>
 
-#define DEFAULT_NUM_THREADS 8
+#define DEFAULT_NUM_THREADS 4
 #define MIN_PARALLEL_DOWNLOAD_SIZE 65536ull
 #define EXHAUST_SIZE_BEFORE_DONT_NEED (1024ull * 1024ull * 1024ull)
 
