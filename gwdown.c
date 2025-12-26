@@ -77,6 +77,7 @@ struct gwdown_ctx {
 	bool				support_map_download;
 	bool				continue_parallel_download;
 	bool				use_mmap;
+	char				**ifaces;
 	char				*url;
 	char				*output;
 	struct gwdown_thread		*threads;
@@ -86,6 +87,7 @@ struct gwdown_ctx {
 	pthread_mutex_t			download_finished_mutex;
 	uint64_t			per_thread_size;
 	uint16_t			num_threads;
+	uint16_t			num_ifaces;
 };
 
 static struct gwdown_ctx *g_ctx;
@@ -98,6 +100,7 @@ static const struct option long_options[] = {
 	{"resume", no_argument, 0, 'r'},
 	{"verbose", no_argument, 0, 'V'},
 	{"mmap", no_argument, 0, 'M'},
+	{"iface", required_argument, 0, 'I'},
 	{0, 0, 0, 0}
 };
 
@@ -112,6 +115,7 @@ static void help(const char *prog)
 	printf("  -r, --resume\t\t\tResume download\n");
 	printf("  -V, --verbose\t\t\tVerbose output\n");
 	printf("  -M, --mmap\t\t\tUse mmap for writing file\n");
+	printf("  -I, --iface\t\t\tUse specified interface\n");
 	printf("\n");
 	printf("License: GPLv2\n");
 	printf("Author: Alviro Iskandar Setiawan <alviro.iskandar@gnuweeb.org>\n");
@@ -124,10 +128,12 @@ static int parse_options(int argc, char *argv[], struct gwdown_ctx *ctx)
 {
 	int ret = 0;
 
+	ctx->ifaces = NULL;
+	ctx->num_ifaces = 0;
 	while (1) {
 		int c;
 
-		c = getopt_long(argc, argv, "hvo:t:rVM", long_options, NULL);
+		c = getopt_long(argc, argv, "hvo:t:rVMI:", long_options, NULL);
 		if (c == -1)
 			break;
 
@@ -154,6 +160,13 @@ static int parse_options(int argc, char *argv[], struct gwdown_ctx *ctx)
 			break;
 		case 'M':
 			ctx->use_mmap = true;
+			break;
+		case 'I':
+			ctx->ifaces = realloc(ctx->ifaces, (ctx->num_ifaces + 1) * sizeof(char *));
+			if (!ctx->ifaces)
+				return -ENOMEM;
+			ctx->ifaces[ctx->num_ifaces] = optarg;
+			ctx->num_ifaces++;
 			break;
 		default:
 			printf("Error: Unknown option '%s'\n\n", argv[optind]);
@@ -232,6 +245,12 @@ static int init_threads(struct gwdown_ctx *ctx)
 			 */
 			fprintf(stderr, "Error: Failed to init curl\n");
 			return -ENOMEM;
+		}
+
+		if (ctx->num_ifaces > 0) {
+			const char *iface = ctx->ifaces[i % ctx->num_ifaces];
+			curl_easy_setopt(thread->curl, CURLOPT_INTERFACE, iface);
+			printf("Thread %u is using interface %s\n", i, iface);
 		}
 	}
 
@@ -318,6 +337,7 @@ static void destroy_gwdown_context(struct gwdown_ctx *ctx)
 	destroy_file_info(ctx);
 	destroy_file_state(ctx);
 	free(ctx->url);
+	free(ctx->ifaces);
 	curl_global_cleanup();
 }
 
