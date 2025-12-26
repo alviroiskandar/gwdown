@@ -23,6 +23,7 @@
 #include <sys/mman.h>
 #include <libgen.h>
 #include <curl/curl.h>
+#include <sys/stat.h>
 
 #define DEFAULT_NUM_THREADS 4
 #define MIN_PARALLEL_DOWNLOAD_SIZE 65536ull
@@ -493,6 +494,7 @@ static int allocate_file(struct gwdown_ctx *ctx)
 {
 	struct gwdown_file_state *state = &ctx->file_state;
 	struct gwdown_file_info *info = &ctx->file_info;
+	struct stat st;
 	int ret;
 	int fd;
 
@@ -524,12 +526,22 @@ static int allocate_file(struct gwdown_ctx *ctx)
 		return 0;
 	}
 
-	ret = ftruncate(fd, info->content_length);
+	ret = fstat(fd, &st);
 	if (ret) {
 		ret = -errno;
-		fprintf(stderr, "Failed to truncate file %s: %s\n",
-			info->filename, strerror(-ret));
+		fprintf(stderr, "Failed to stat file %s: %s\n", info->filename,
+			strerror(-ret));
 		goto out_err;
+	}
+
+	if (S_ISREG(st.st_mode)) {
+		ret = ftruncate(fd, info->content_length);
+		if (ret) {
+			ret = -errno;
+			fprintf(stderr, "Failed to truncate file %s: %s\n",
+				info->filename, strerror(-ret));
+			goto out_err;
+		}
 	}
 
 	if (!ctx->use_mmap)
