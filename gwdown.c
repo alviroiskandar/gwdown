@@ -23,6 +23,8 @@
 #include <sys/mman.h>
 #include <libgen.h>
 #include <curl/curl.h>
+#include <sys/stat.h>
+#include <stdatomic.h>
 
 #define DEFAULT_NUM_THREADS 4
 #define MIN_PARALLEL_DOWNLOAD_SIZE 65536ull
@@ -77,6 +79,9 @@ struct gwdown_ctx {
 	bool				support_map_download;
 	bool				continue_parallel_download;
 	bool				use_mmap;
+	bool				show_progress;
+	_Atomic(uint32_t)		nr_online_threads;
+	char				**ifaces;
 	char				*url;
 	char				*output;
 	struct gwdown_thread		*threads;
@@ -86,6 +91,11 @@ struct gwdown_ctx {
 	pthread_mutex_t			download_finished_mutex;
 	uint64_t			per_thread_size;
 	uint16_t			num_threads;
+	uint16_t			num_ifaces;
+	_Atomic(uint64_t)		written_bytes;
+	pthread_t			progress_thread;
+	pthread_mutex_t			progress_lock;
+	pthread_cond_t			progress_cond;
 };
 
 static struct gwdown_ctx *g_ctx;
@@ -98,6 +108,8 @@ static const struct option long_options[] = {
 	{"resume", no_argument, 0, 'r'},
 	{"verbose", no_argument, 0, 'V'},
 	{"mmap", no_argument, 0, 'M'},
+	{"iface", required_argument, 0, 'I'},
+	{"show-progress", required_argument, 0, 'Z'},
 	{0, 0, 0, 0}
 };
 
@@ -112,6 +124,8 @@ static void help(const char *prog)
 	printf("  -r, --resume\t\t\tResume download\n");
 	printf("  -V, --verbose\t\t\tVerbose output\n");
 	printf("  -M, --mmap\t\t\tUse mmap for writing file\n");
+	printf("  -I, --iface\t\t\tUse specified interface\n");
+	printf("  -Z, --show-progress\t\tShow download progress\n");
 	printf("\n");
 	printf("License: GPLv2\n");
 	printf("Author: Alviro Iskandar Setiawan <alviro.iskandar@gnuweeb.org>\n");
@@ -124,10 +138,12 @@ static int parse_options(int argc, char *argv[], struct gwdown_ctx *ctx)
 {
 	int ret = 0;
 
+	ctx->ifaces = NULL;
+	ctx->num_ifaces = 0;
 	while (1) {
 		int c;
 
-		c = getopt_long(argc, argv, "hvo:t:rVM", long_options, NULL);
+		c = getopt_long(argc, argv, "hvo:t:rVMI:Z", long_options, NULL);
 		if (c == -1)
 			break;
 
@@ -154,6 +170,16 @@ static int parse_options(int argc, char *argv[], struct gwdown_ctx *ctx)
 			break;
 		case 'M':
 			ctx->use_mmap = true;
+			break;
+		case 'I':
+			ctx->ifaces = realloc(ctx->ifaces, (ctx->num_ifaces + 1) * sizeof(char *));
+			if (!ctx->ifaces)
+				return -ENOMEM;
+			ctx->ifaces[ctx->num_ifaces] = optarg;
+			ctx->num_ifaces++;
+			break;
+		case 'Z':
+			ctx->show_progress = true;
 			break;
 		default:
 			printf("Error: Unknown option '%s'\n\n", argv[optind]);
@@ -233,12 +259,91 @@ static int init_threads(struct gwdown_ctx *ctx)
 			fprintf(stderr, "Error: Failed to init curl\n");
 			return -ENOMEM;
 		}
+
+		if (ctx->num_ifaces > 0) {
+			const char *iface = ctx->ifaces[i % ctx->num_ifaces];
+			curl_easy_setopt(thread->curl, CURLOPT_INTERFACE, iface);
+			printf("Thread %u is using interface %s\n", i, iface);
+		}
 	}
 
 	return 0;
 }
 
 static void destroy_gwdown_context(struct gwdown_ctx *ctx);
+
+static void wait_all_threads_online(struct gwdown_ctx *ctx)
+{
+	if (!ctx->show_progress)
+		return;
+
+	pthread_mutex_lock(&ctx->progress_lock);
+	while (atomic_load(&ctx->nr_online_threads) < ctx->num_threads)
+		pthread_cond_wait(&ctx->progress_cond, &ctx->progress_lock);
+	pthread_mutex_unlock(&ctx->progress_lock);
+}
+
+static void print_size(uint64_t size)
+{
+	if (size < 1024ull) {
+		printf("Downloaded: %" PRIu64 " B, ", size);
+	} else if (size < (1024ull * 1024ull)) {
+		printf("Downloaded: %.2f KB, ", (double)size / 1024.0);
+	} else if (size < (1024ull * 1024ull * 1024ull)) {
+		printf("Downloaded: %.2f MB, ", (double)size / (1024.0 * 1024.0));
+	} else {
+		printf("Downloaded: %.2f GB, ", (double)size / (1024.0 * 1024.0 * 1024.0));
+	}
+}
+
+static void print_speed(uint64_t last_wb, uint64_t wb)
+{
+	uint64_t diff;
+	double speed;
+
+	print_size(wb);
+
+	diff = wb - last_wb;
+	if (diff == 0) {
+		printf("Down speed: 0 B/s");
+		return;
+	}
+
+	speed = ((double)diff / 1024.0) * 2.0;
+	if (speed < 1024.0) {
+		printf("Down speed: %.2f KB/s", speed);
+	} else {
+		speed = speed / 1024.0;
+		if (speed < 1024.0) {
+			printf("Down speed: %.2f MB/s", speed);
+		} else {
+			speed = speed / 1024.0;
+			printf("Down speed: %.2f GB/s", speed);
+		}
+	}
+
+	speed = (((double)diff / 1024.0) * 2.0 / 1024.0);
+	printf(" (%.2f Mbps)                         ", speed * 8);
+}
+
+static void *progress_thread_func(void *arg)
+{
+	struct gwdown_ctx *ctx = arg;
+	uint64_t wb, last_wb = 0;
+	size_t i = 0;
+
+	wait_all_threads_online(ctx);
+
+	while (!ctx->stop) {
+		wb = atomic_load_explicit(&ctx->written_bytes, memory_order_relaxed);
+		printf("\r[q=%06zu] ", i++/2);
+		print_speed(last_wb, wb);
+		fflush(stdout);
+		last_wb = wb;
+		usleep(500000);
+	}
+	return 0;
+}
 
 static int init_gwdown_context(struct gwdown_ctx *ctx)
 {
@@ -247,6 +352,19 @@ static int init_gwdown_context(struct gwdown_ctx *ctx)
 	if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK)
 		return -ENOMEM;
 
+	if (ctx->show_progress) {
+		ret = pthread_create(&ctx->progress_thread, NULL,
+				     &progress_thread_func, ctx);
+		if (ret) {
+			ctx->show_progress = false;
+			fprintf(stderr, "Failed to create progress thread: %s\n",
+				strerror(ret));
+			goto out;
+		}
+	}
+
+	atomic_store_explicit(&ctx->nr_online_threads, 0, memory_order_relaxed);
+	atomic_store_explicit(&ctx->written_bytes, 0, memory_order_relaxed);
 	ret = init_threads(ctx);
 	if (ret)
 		goto out;
@@ -318,6 +436,7 @@ static void destroy_gwdown_context(struct gwdown_ctx *ctx)
 	destroy_file_info(ctx);
 	destroy_file_state(ctx);
 	free(ctx->url);
+	free(ctx->ifaces);
 	curl_global_cleanup();
 }
 
@@ -473,6 +592,7 @@ static int allocate_file(struct gwdown_ctx *ctx)
 {
 	struct gwdown_file_state *state = &ctx->file_state;
 	struct gwdown_file_info *info = &ctx->file_info;
+	struct stat st;
 	int ret;
 	int fd;
 
@@ -504,12 +624,22 @@ static int allocate_file(struct gwdown_ctx *ctx)
 		return 0;
 	}
 
-	ret = ftruncate(fd, info->content_length);
+	ret = fstat(fd, &st);
 	if (ret) {
 		ret = -errno;
-		fprintf(stderr, "Failed to truncate file %s: %s\n",
-			info->filename, strerror(-ret));
+		fprintf(stderr, "Failed to stat file %s: %s\n", info->filename,
+			strerror(-ret));
 		goto out_err;
+	}
+
+	if (S_ISREG(st.st_mode)) {
+		ret = ftruncate(fd, info->content_length);
+		if (ret) {
+			ret = -errno;
+			fprintf(stderr, "Failed to truncate file %s: %s\n",
+				info->filename, strerror(-ret));
+			goto out_err;
+		}
 	}
 
 	if (!ctx->use_mmap)
@@ -657,6 +787,7 @@ static size_t try_fetch_file_body_curl_callback(void *ptr, size_t size,
 			info->filename, strerror(errno));
 		return 0;
 	}
+
 	return (size_t)wr_ret;
 }
 
@@ -771,6 +902,11 @@ static size_t paralell_download_headers_curl_callback(void *ptr, size_t size,
 	if (rsize == 2 && !memcmp(ptr, "\r\n", 2)) {
 		if (thread->got_206) {
 			printf("Thread %u is downloading...\n", thread->tid);
+			pthread_mutex_lock(&ctx->progress_lock);
+			atomic_fetch_add_explicit(&ctx->nr_online_threads, 1, memory_order_relaxed);
+			pthread_cond_broadcast(&ctx->progress_cond);
+			pthread_mutex_unlock(&ctx->progress_lock);
+			wait_all_threads_online(ctx);
 			return 2;
 		}
 
@@ -842,6 +978,7 @@ static size_t paralell_download_body_curl_callback(void *ptr, size_t size,
 		thread->offset += wr_ret;
 	}
 
+	atomic_fetch_add(&ctx->written_bytes, (uint64_t)wr_ret);
 	return (size_t)wr_ret;
 }
 
@@ -927,7 +1064,7 @@ static void *run_gwdown_parallel_download_worker(void *data)
 		fprintf(stderr, "run_gwdown_parallel_download_worker() thread %u: %s\n",
 			thread->tid, curl_easy_strerror(res));
 	} else {
-		printf("Thread %u has finished the download!\n", thread->tid);
+		printf("\nThread %u has finished the download!\n", thread->tid);
 	}
 
 	thread->finished = true;
